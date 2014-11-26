@@ -1,19 +1,5 @@
 package com.github.andlyticsproject.adsense;
 
-import java.io.IOException;
-import java.text.DateFormat;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Calendar;
-import java.util.Collections;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-
 import android.annotation.SuppressLint;
 import android.app.Application;
 import android.content.Context;
@@ -27,15 +13,33 @@ import com.github.andlyticsproject.model.AdmobStats;
 import com.github.andlyticsproject.util.Utils;
 import com.google.api.client.extensions.android.http.AndroidHttp;
 import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential;
+import com.google.api.client.googleapis.json.GoogleJsonError.ErrorInfo;
+import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.adsense.AdSense;
-import com.google.api.services.adsense.AdSense.Reports.Generate;
+import com.google.api.services.adsense.AdSense.Accounts.Reports.Generate;
 import com.google.api.services.adsense.AdSenseScopes;
+import com.google.api.services.adsense.model.Account;
+import com.google.api.services.adsense.model.Accounts;
 import com.google.api.services.adsense.model.AdClients;
 import com.google.api.services.adsense.model.AdUnit;
 import com.google.api.services.adsense.model.AdUnits;
 import com.google.api.services.adsense.model.AdsenseReportsGenerateResponse;
+
+import java.io.IOException;
+import java.text.DateFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 @SuppressLint("SimpleDateFormat")
 public class AdSenseClient {
@@ -56,8 +60,21 @@ public class AdSenseClient {
 
 	public static void foregroundSyncStats(Context context, String admobAccount,
 			List<String> adUnits) throws Exception {
-		AdSense adsense = createForegroundSyncClient(context, admobAccount);
-		syncStats(context, adsense, adUnits);
+		try {
+			AdSense adsense = createForegroundSyncClient(context, admobAccount);
+			syncStats(context, adsense, adUnits);
+		} catch (GoogleJsonResponseException e) {
+			List<ErrorInfo> errors = e.getDetails().getErrors();
+			for (ErrorInfo err : errors) {
+				if ("dailyLimitExceeded".equals(err.getReason())) {
+					// ignore
+					Log.w(TAG, "Quota exeeded: " + e.toString());
+					return;
+				}
+			}
+
+			throw e;
+		}
 	}
 
 	private static AdSense createForegroundSyncClient(Context context, String admobAccount) {
@@ -73,9 +90,22 @@ public class AdSenseClient {
 	public static void backgroundSyncStats(Context context, String admobAccount,
 			List<String> adUnits, Bundle extras, String authority, Bundle syncBundle)
 			throws Exception {
-		AdSense adsense = createBackgroundSyncClient(context, admobAccount, extras, authority,
-				syncBundle);
-		syncStats(context, adsense, adUnits);
+		try {
+			AdSense adsense = createBackgroundSyncClient(context, admobAccount, extras, authority,
+					syncBundle);
+			syncStats(context, adsense, adUnits);
+		} catch (GoogleJsonResponseException e) {
+			List<ErrorInfo> errors = e.getDetails().getErrors();
+			for (ErrorInfo err : errors) {
+				if ("dailyLimitExceeded".equals(err.getReason())) {
+					// ignore
+					Log.w(TAG, "Quota exeeded: " + e.toString());
+					return;
+				}
+			}
+
+			throw e;
+		}
 	}
 
 	private static void syncStats(Context context, AdSense adsense, List<String> adUnits)
@@ -88,14 +118,19 @@ public class AdSenseClient {
 			bulkInsert = true;
 		}
 
+		Account account = getFirstAccount(adsense);
+		if (account == null) {
+			return;
+		}
+
 		// we assume there is only one(?)
-		String adClientId = getClientId(adsense);
+		String adClientId = getClientId(adsense, account);
 		if (adClientId == null) {
 			// XXX throw?
 			return;
 		}
 
-		List<AdmobStats> result = generateReport(adsense, adClientId, startDate, endDate);
+		List<AdmobStats> result = generateReport(adsense, account, adClientId, startDate, endDate);
 
 		updateStats(context, bulkInsert, result);
 	}
@@ -128,15 +163,25 @@ public class AdSenseClient {
 		return new Calendar[] { startDateCal, endDateCal };
 	}
 
-	private static String getClientId(AdSense adsense) throws IOException {
-		AdClients adClients = adsense.adclients().list().setMaxResults(MAX_LIST_PAGE_SIZE)
-				.setPageToken(null).execute();
+	private static String getClientId(AdSense adsense, Account account) throws IOException {
+		AdClients adClients = adsense.accounts().adclients().list(account.getId())
+				.setMaxResults(MAX_LIST_PAGE_SIZE).setPageToken(null).execute();
 		if (adClients.getItems() == null || adClients.getItems().isEmpty()) {
 			return null;
 		}
 
 		// we assume there is only one(?)
 		return adClients.getItems().get(0).getId();
+	}
+
+	private static Account getFirstAccount(AdSense adsense) throws IOException {
+		Accounts accounts = adsense.accounts().list().execute();
+
+		if (accounts.isEmpty()) {
+			return null;
+		}
+
+		return accounts.getItems().get(0);
 	}
 
 	private static void updateStats(Context context, boolean bulkInsert, List<AdmobStats> result) {
@@ -173,11 +218,12 @@ public class AdSenseClient {
 		return adsense;
 	}
 
-	private static List<AdmobStats> generateReport(AdSense adsense, String adClientId,
-			Date startDate, Date endDate) throws IOException, ParseException {
+	private static List<AdmobStats> generateReport(AdSense adsense, Account account,
+			String adClientId, Date startDate, Date endDate) throws IOException, ParseException {
 		String startDateStr = DATE_FORMATTER.format(startDate);
 		String endDateStr = DATE_FORMATTER.format(endDate);
-		Generate request = adsense.reports().generate(startDateStr, endDateStr);
+		Generate request = adsense.accounts().reports()
+				.generate(account.getId(), startDateStr, endDateStr);
 
 		// Specify the desired ad client using a filter.
 		request.setFilter(Arrays.asList("AD_CLIENT_ID==" + escapeFilterParameter(adClientId)));
@@ -248,14 +294,20 @@ public class AdSenseClient {
 	public static Map<String, String> getAdUnits(Context context, String admobAccount)
 			throws IOException {
 		AdSense adsense = createForegroundSyncClient(context, admobAccount);
-		String adClientId = getClientId(adsense);
+
+		Account account = getFirstAccount(adsense);
+		if (account == null) {
+			return new HashMap<String, String>();
+		}
+
+		String adClientId = getClientId(adsense, account);
 		if (adClientId == null) {
 			// XXX throw?
 			return new HashMap<String, String>();
 		}
 
-		AdUnits units = adsense.adunits().list(adClientId).setMaxResults(MAX_LIST_PAGE_SIZE)
-				.setPageToken(null).execute();
+		AdUnits units = adsense.accounts().adunits().list(account.getId(), adClientId)
+				.setMaxResults(MAX_LIST_PAGE_SIZE).setPageToken(null).execute();
 		List<AdUnit> items = units.getItems();
 
 		// preserver order

@@ -11,7 +11,6 @@ import android.util.Log;
 import com.github.andlyticsproject.AndlyticsApp;
 import com.github.andlyticsproject.console.AuthenticationException;
 import com.github.andlyticsproject.console.NetworkException;
-import com.github.andlyticsproject.model.DeveloperConsoleAccount;
 import com.google.android.gms.auth.GoogleAuthException;
 import com.google.android.gms.auth.GoogleAuthUtil;
 import com.google.android.gms.auth.GooglePlayServicesAvailabilityException;
@@ -20,14 +19,19 @@ import com.google.android.gms.auth.UserRecoverableNotifiedException;
 import com.google.android.gms.common.GooglePlayServicesUtil;
 
 import org.apache.http.HttpEntity;
+import org.apache.http.HttpHost;
 import org.apache.http.HttpResponse;
 import org.apache.http.HttpStatus;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.impl.client.DefaultHttpClient;
 import org.apache.http.message.BasicNameValuePair;
+import org.apache.http.protocol.BasicHttpContext;
+import org.apache.http.protocol.ExecutionContext;
+import org.apache.http.protocol.HttpContext;
 import org.apache.http.util.EntityUtils;
 
 import java.io.IOException;
@@ -73,7 +77,6 @@ public class OauthAccountManagerAuthenticator extends BaseAuthenticator {
 		return authenticateInternal(null, invalidate);
 	}
 
-	@SuppressWarnings("deprecation")
 	private SessionCredentials authenticateInternal(Activity activity, boolean invalidate)
 			throws AuthenticationException {
 		try {
@@ -157,7 +160,9 @@ public class OauthAccountManagerAuthenticator extends BaseAuthenticator {
 						+ response.getStatusLine());
 			}
 			String uberToken = EntityUtils.toString(response.getEntity(), "UTF-8");
-			Log.d(TAG, "uber token: " + uberToken);
+			if (DEBUG) {
+				Log.d(TAG, "uber token: " + uberToken);
+			}
 			if (uberToken == null || "".equals(uberToken) || uberToken.contains("Error")) {
 				throw new AuthenticationException("Cannot get uber token. Got: " + uberToken);
 			}
@@ -172,11 +177,14 @@ public class OauthAccountManagerAuthenticator extends BaseAuthenticator {
 					.appendQueryParameter("source", "ChromiumBrowser")
 					.appendQueryParameter("uberauth", uberToken)
 					.appendQueryParameter("continue", DEVELOPER_CONSOLE_URL).build().toString();
-			Log.d(TAG, "MergeSession URL: " + webloginUrl);
+			if (DEBUG) {
+				Log.d(TAG, "MergeSession URL: " + webloginUrl);
+			}
 
 			UrlEncodedFormEntity formEntity = new UrlEncodedFormEntity(pairs, "UTF-8");
 			getConsole.setEntity(formEntity);
-			response = httpClient.execute(getConsole);
+			HttpContext context = new BasicHttpContext();
+			response = httpClient.execute(getConsole, context);
 			status = response.getStatusLine().getStatusCode();
 			if (status == HttpStatus.SC_UNAUTHORIZED) {
 				throw new AuthenticationException("Authentication token expired: "
@@ -186,6 +194,12 @@ public class OauthAccountManagerAuthenticator extends BaseAuthenticator {
 				throw new AuthenticationException("Authentication error: "
 						+ response.getStatusLine());
 			}
+
+			String currentUrl = getCurrentUrl(context);
+			if (DEBUG) {
+				Log.d(TAG, "redirect URL" + currentUrl);
+			}
+
 			HttpEntity entity = response.getEntity();
 			if (entity == null) {
 				throw new AuthenticationException("Authentication error: null result?");
@@ -196,31 +210,29 @@ public class OauthAccountManagerAuthenticator extends BaseAuthenticator {
 				Log.d(TAG, "Response: " + responseStr);
 			}
 
-			DeveloperConsoleAccount[] developerAccounts = findDeveloperAccounts(responseStr);
-			if (developerAccounts == null) {
-				debugAuthFailure(activity, responseStr, webloginUrl);
+			if (!currentUrl.contains("play.google.com")) {
+				debugAuthFailure(responseStr, currentUrl);
 
-				throw new AuthenticationException("Couldn't get developer account ID.");
+				throw new AuthenticationException(
+						"Couldn't connect to developer console. Additional authentication may be required.");
 			}
 
-			String xsrfToken = findXsrfToken(responseStr);
-			if (xsrfToken == null) {
-				debugAuthFailure(activity, responseStr, webloginUrl);
-
-				throw new AuthenticationException("Couldn't get XSRF token.");
-			}
-
-			List<String> whitelistedFeatures = findWhitelistedFeatures(responseStr);
-
-			SessionCredentials result = new SessionCredentials(accountName, xsrfToken,
-					developerAccounts);
-			result.addCookies(httpClient.getCookieStore().getCookies());
-			result.addWhitelistedFeatures(whitelistedFeatures);
-
-			return result;
+			return createSessionCredentials(accountName, webloginUrl, responseStr, httpClient
+					.getCookieStore().getCookies());
 		} catch (IOException e) {
 			throw new NetworkException(e);
 		}
+	}
+
+	private static String getCurrentUrl(HttpContext context) {
+		HttpUriRequest currentReq = (HttpUriRequest) context
+				.getAttribute(ExecutionContext.HTTP_REQUEST);
+		HttpHost currentHost = (HttpHost) context
+				.getAttribute(ExecutionContext.HTTP_TARGET_HOST);
+		String currentUrl = (currentReq.getURI().isAbsolute()) ? currentReq.getURI().toString()
+				: (currentHost.toURI() + currentReq.getURI());
+
+		return currentUrl;
 	}
 
 }

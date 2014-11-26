@@ -1,17 +1,17 @@
 package com.github.andlyticsproject.dialog;
 
+import android.app.DialogFragment;
 import android.os.Bundle;
-import android.support.v4.app.DialogFragment;
+import android.text.Html;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.view.ViewGroup;
 import android.widget.TextView;
 
-import com.actionbarsherlock.app.SherlockDialogFragment;
 import com.github.andlyticsproject.R;
 
-public class LongTextDialog extends SherlockDialogFragment {
+public class LongTextDialog extends DialogFragment {
 	public LongTextDialog() {
 		setStyle(DialogFragment.STYLE_NO_FRAME, R.style.Dialog);
 	}
@@ -29,7 +29,7 @@ public class LongTextDialog extends SherlockDialogFragment {
 				.findViewById(R.id.longtext_title);
 
 		if (arguments.containsKey("longText")) {
-			longText.setText(arguments.getString("longText"));
+			longText.setText(Html.fromHtml(arguments.getString("longText")));
 		}
 
 		if (arguments.containsKey("title")) {
